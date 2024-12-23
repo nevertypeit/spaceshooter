@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>Космический шутер для детей (Single File)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <!-- Встроенные стили (styles.css) -->
+  <style>
+    /* Сброс некоторых отступов */
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background-color: #000;
+      font-family: Arial, sans-serif;
+      overflow: hidden; /* Чтобы на мобильных не прокручивалась страница */
+    }
+
+    #gameContainer {
+      position: relative;
+      margin: 0 auto;
+      text-align: center;
+      width: 480px;   /* можно сделать 100% под мобильные, если хотите */
+      height: 640px;  /* можно сделать 100vh, но тогда придётся учесть мобильные панели */
+      border: 2px solid #333; /* Чтобы было видно границы игры */
+    }
+
+    /* Сам canvas, где происходит игра */
+    #gameCanvas {
+      background: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGMAAQAFAAH+2pdCAAAAAElFTkSuQmCC) no-repeat center center;
+      background-size: cover;
+      display: block; /* убираем лишние пробелы */
+    }
+
+    /* Интерфейс (очки, здоровье, волна) */
+    #scoreDisplay,
+    #healthDisplay,
+    #waveDisplay {
+      position: absolute;
+      top: 10px;
+      color: #fff;
+      font-size: 20px;
+    }
+
+    #scoreDisplay { left: 10px; }
+    #healthDisplay { right: 10px; }
+    #waveDisplay {
+      left: 50%;
+      transform: translateX(-50%);
+    }
+  </style>
+
+</head>
+<body>
+
+  <div id="gameContainer">
+    <!-- Canvas для рендеринга игры -->
+    <canvas id="gameCanvas" width="480" height="640"></canvas>
+
+    <!-- Элементы интерфейса -->
+    <div id="scoreDisplay">Score: 0</div>
+    <div id="healthDisplay">Health: 3</div>
+    <div id="waveDisplay">Wave: 1</div>
+  </div>
+
+  <!-- Весь JavaScript-код (main.js + JSON + etc.) -->
+  <script>
+  /********************************************************************
+   * Псевдо-JSON-таблица апгрейдов (в реальном проекте можно хранить где-то во внешнем файле)
+   ********************************************************************/
+  const upgrades = [
+    {
+      id: "triple_shot",
+      name: "Triple Shot",
+      description: "Стреляет тремя снарядами",
+      effect: { shots: 3 }
+    },
+    {
+      id: "speed_boost",
+      name: "Speed Boost",
+      description: "Увеличивает скорость корабля",
+      effect: { speedMultiplier: 1.5 }
+    },
+    {
+      id: "shield",
+      name: "Shield",
+      description: "Защищает от одного столкновения",
+      effect: { extraLife: 1 }
+    }
+  ];
+
+  /********************************************************************
+   * Настройки для отправки данных (Webhook)
+   ********************************************************************/
+  const webhookUrl = "https://example.com/webhook"; // <-- Замените на свой URL
+
+  function sendGameDataToWebhook(playerId, score, upgrades) {
+    const data = {
+      player_id: playerId,
+      score: score,
+      upgrades: upgrades
+    };
+
+    fetch(webhookUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(data)
+    })
+    .then((response) => {
+      if (!response.ok) {
+        console.error("Ошибка при отправке данных на вебхук:", response.status);
+      }
+      return response.json().catch(() => null);
+    })
+    .then((json) => {
+      if (json) {
+        console.log("Успешно отправили данные:", json);
+      } else {
+        console.log("Ответ вебхука без JSON или пустой");
+      }
+    })
+    .catch((error) => {
+      console.error("Ошибка при fetch:", error);
+    });
+  }
+
+  /********************************************************************
+   * Основная логика игры
+   ********************************************************************/
+  // Получаем ссылки на элементы
+  const canvas = document.getElementById("gameCanvas");
+  const ctx = canvas.getContext("2d");
+
+  const scoreDisplay = document.getElementById("scoreDisplay");
+  const healthDisplay = document.getElementById("healthDisplay");
+  const waveDisplay = document.getElementById("waveDisplay");
+
+  // Параметры игрока
+  let playerX = canvas.width / 2 - 20; // отцентрируем прямоугольник ~40px
+  let playerY = canvas.height - 60;
+  let playerWidth = 40;
+  let playerHeight = 40;
+  let playerSpeed = 5;  // Можно регулировать через “speed_boost”
+  let health = 3;
+
+  // Игровые параметры
+  let score = 0;
+  let wave = 1;
+  let gameOver = false;
+
+  // Враги
+  let enemies = [];
+  let enemySpeed = 2;
+  let enemiesPerWave = 5;
+
+  // Автоматическая стрельба
+  let bullets = [];
+  let bulletSpeed = 5;
+  let bulletCooldown = 500; // миллисекунды между выстрелами
+  let lastBulletTime = 0;
+
+  // Управление (для ПК — стрелками, для мобильных — свайпы)
+  let leftPressed = false;
+  let rightPressed = false;
+
+  // События клавиатуры (для тестирования на ПК)
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowLeft" || e.key === "a") leftPressed = true;
+    if (e.key === "ArrowRight" || e.key === "d") rightPressed = true;
+  });
+
+  document.addEventListener("keyup", (e) => {
+    if (e.key === "ArrowLeft" || e.key === "a") leftPressed = false;
+    if (e.key === "ArrowRight" || e.key === "d") rightPressed = false;
+  });
+
+  // События для мобильных (свайпы)
+  let touchStartX = null;
+
+  canvas.addEventListener("touchstart", (e) => {
+    touchStartX = e.touches[0].clientX;
+  });
+
+  canvas.addEventListener("touchmove", (e) => {
+    e.preventDefault(); // чтобы страница не скроллилась
+    let touchMoveX = e.touches[0].clientX;
+    let deltaX = touchMoveX - touchStartX;
+    // Двигаем корабль пропорционально смещению
+    playerX += deltaX * 0.2;
+    touchStartX = touchMoveX;
+  });
+
+  /********************************************************************
+   * Функция спавна волны врагов
+   ********************************************************************/
+  function spawnWave() {
+    for (let i = 0; i < enemiesPerWave; i++) {
+      enemies.push({
+        x: Math.random() * (canvas.width - 40),
+        y: -40 - Math.random() * 100,  // рандомно чуть выше экрана
+        width: 40,
+        height: 40,
+        speed: enemySpeed,
+        alive: true
+      });
+    }
+  }
+
+  /********************************************************************
+   * Автоматическая стрельба (раз в bulletCooldown мс)
+   ********************************************************************/
+  function shoot() {
+    const now = Date.now();
+    if (now - lastBulletTime > bulletCooldown) {
+      // Создаём пулю
+      bullets.push({
+        x: playerX + playerWidth / 2 - 2, // примерно центр
+        y: playerY - 10,
+        width: 4,
+        height: 10
+      });
+      lastBulletTime = now;
+    }
+  }
+
+  /********************************************************************
+   * Главный цикл обновления логики
+   ********************************************************************/
+  function update() {
+    if (gameOver) return;
+
+    // Управление игроком (ПК)
+    if (leftPressed) playerX -= playerSpeed;
+    if (rightPressed) playerX += playerSpeed;
+
+    // Ограничиваем, чтобы корабль не выходил за край
+    if (playerX < 0) playerX = 0;
+    if (playerX + playerWidth > canvas.width) {
+      playerX = canvas.width - playerWidth;
+    }
+
+    // Стреляем (автоматически)
+    shoot();
+
+    // Двигаем пули
+    bullets.forEach((bullet) => {
+      bullet.y -= bulletSpeed;
+    });
+    // Убираем пули, которые вышли за границу
+    bullets = bullets.filter((b) => b.y + b.height > 0);
+
+    // Двигаем врагов
+    enemies.forEach((enemy) => {
+      if (enemy.alive) {
+        enemy.y += enemy.speed;
+        // Проверка столкновения с кораблём
+        if (
+          enemy.x < playerX + playerWidth &&
+          enemy.x + enemy.width > playerX &&
+          enemy.y < playerY + playerHeight &&
+          enemy.y + enemy.height > playerY
+        ) {
+          // Столкновение с игроком
+          health--;
+          enemy.alive = false;
+          if (health <= 0) {
+            health = 0;
+            gameOver = true;
+            endGame();
+          }
+        }
+        // Враг ушёл за экран
+        if (enemy.y > canvas.height) {
+          enemy.alive = false;
+        }
+      }
+    });
+
+    // Проверяем столкновение пуль с врагами
+    bullets.forEach((bullet) => {
+      enemies.forEach((enemy) => {
+        if (enemy.alive) {
+          if (
+            bullet.x < enemy.x + enemy.width &&
+            bullet.x + bullet.width > enemy.x &&
+            bullet.y < enemy.y + enemy.height &&
+            bullet.y + bullet.height > enemy.y
+          ) {
+            // Пуля попала во врага
+            enemy.alive = false;
+            bullet.y = -999; // чтобы не засчитывалось повторно
+            score += 10;     // условные очки
+          }
+        }
+      });
+    });
+
+    // Удаляем “мертвых” врагов
+    enemies = enemies.filter((e) => e.alive);
+
+    // Если все враги уничтожены, генерируем новую волну
+    if (enemies.length === 0) {
+      wave++;
+      enemiesPerWave += 2;
+      enemySpeed += 0.2;
+      spawnWave();
+    }
+  }
+
+  /********************************************************************
+   * Отрисовка
+   ********************************************************************/
+  function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // Рисуем игрока (примитивно — синий квадрат)
+    ctx.fillStyle = "blue";
+    ctx.fillRect(playerX, playerY, playerWidth, playerHeight);
+
+    // Рисуем врагов (красные квадраты)
+    enemies.forEach((enemy) => {
+      if (enemy.alive) {
+        ctx.fillStyle = "red";
+        ctx.fillRect(enemy.x, enemy.y, enemy.width, enemy.height);
+      }
+    });
+
+    // Рисуем пули (зелёные прямоугольники)
+    ctx.fillStyle = "lime";
+    bullets.forEach((bullet) => {
+      ctx.fillRect(bullet.x, bullet.y, bullet.width, bullet.height);
+    });
+
+    // Обновляем интерфейс
+    scoreDisplay.textContent = "Score: " + score;
+    healthDisplay.textContent = "Health: " + health;
+    waveDisplay.textContent = "Wave: " + wave;
+  }
+
+  /********************************************************************
+   * Главный игровой цикл (requestAnimationFrame)
+   ********************************************************************/
+  function loop() {
+    update();
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  /********************************************************************
+   * Когда игра заканчивается
+   ********************************************************************/
+  function endGame() {
+    console.log("Game Over! Score:", score);
+
+    // Отправим данные: игрок условно "12345", апгрейды - пустой массив
+    sendGameDataToWebhook("12345", score, []);
+  }
+
+  /********************************************************************
+   * Запуск
+   ********************************************************************/
+  // Сначала генерируем начальную волну
+  spawnWave();
+  // Запускаем цикл
+  loop();
+
+  </script>
+
+</body>
+</html>
